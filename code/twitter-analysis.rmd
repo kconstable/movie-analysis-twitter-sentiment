@@ -1,0 +1,477 @@
+---
+title: "DS710 Final Project -Ken Constable"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+# Load Libraries
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(readr)
+library(ggformula)
+library(readr)
+library(tidyr)
+library(lubridate)
+library(plotly)
+library(scales)
+library(forecast)
+```
+
+# Import Tweet Data from Python
++ import tweet data from python
++ only keep fields needed for the analysis
+```{r}
+getTwitterData<-function(fpath){
+  require(readr)
+
+  df<-read_csv(fpath)%>%
+      select(hashtag,date,retweet,clean_text,sentiment,polarity,followers_count)
+  return(df)
+}
+```
+
+
+# Plot histograms
++ create before/after release date histograms
+```{r}
+plotHistograms<-function(df,relase_date='2019-11-8'){
+  require(dplyr)
+  require(lubridate)
+  require(scales)
+  require(ggformula)
+
+
+  #split df into before and after based on the release_date
+  before<-filter(df,date<relase_date)%>%
+           select(polarity)
+
+  after<-filter(df,date>=relase_date)%>%
+          select(polarity)
+
+  #build the sub-title
+  sub.title<-paste("Mean Polarity Before(",round(mean(before$polarity),2)
+                  ,") and after(",round(mean(after$polarity),2) ,") release date")
+
+  #create a before/after indicator for faceting the charts
+  #remove neutral tweets
+  df%>%
+    mutate(period=ifelse(date>=relase_date,'(2) After','(1) Before'))%>%
+    filter(polarity!=0)%>%
+    gf_dhistogram(~polarity
+                  ,color=~period
+                  ,fill=~period
+                  ,bins=9
+                  ,binwidth = 0.25
+                  ,title = "Sentiment Distribution"
+                  ,subtitle = sub.title
+                  ,xlab = "Polarity"
+                  ,ylab = "Density")%>%
+    gf_fitdistr(dist='dnorm',color=~period)%>%
+    gf_facet_grid(period ~.)%>%
+    gf_refine(scale_fill_manual(values=c("grey","#2E4500"),aesthetics = c("fill","color")))%>%
+    gf_theme(theme_minimal())
+
+}
+```
+
+
+# plot sentiment over time
++ plot tweet volumn by sentitment vs date
++ add 5 day rolling average polarity
++ add 5 day rolling averaage % positive tweets
+```{r}
+plotTweetSentiment<-function(df,date='2019-11-8',alpha=0.05){
+  require(dplyr)
+  require(plotly)
+  require(lubridate)
+
+  #get counts of tweets by sentiment,date
+  #if there are no counts for a particular day, replace the NA with zero
+  #calculate total tweet volume, % positive tweets,before and after indicator
+  d1<-group_by(df,date,sentiment)%>%
+    summarise(count=n())%>%
+    spread(sentiment,count)%>%
+    ungroup()%>%
+    arrange(date)%>%
+    mutate( negative       = ifelse(is.na(negative),0,negative)
+           ,positive       = ifelse(is.na(positive),0,positive)
+           ,neutral        = ifelse(is.na(neutral),0,neutral)
+           ,volume         = negative+positive+neutral
+           ,pos.percent    = positive/volume
+           ,ma.pos.percent = ma(pos.percent,5)
+           ,period         = ifelse(date>=ymd(date),"after","before"))
+
+
+  #find max y height, and before/after dates for plotting the rectangles for before/after
+   max_volume<-max(d1$volume)*1.10
+   min_date<-min(d1$date)
+   max_date<-max(d1$date)
+   hashtag<-df$hashtag[1]
+
+
+  #determine spacing for annotations - varies by hashtag
+  if(hashtag=="DrSleep"){
+    # release date annotation
+     a <- list(
+      x = ymd(date),
+      y = max_volume*0.9,
+      text = "Release Date",
+      xref = "x",
+      yref = "y",
+      showarrow = TRUE,
+      arrowhead = 5,
+      ax=-75,
+      ay=0
+    )
+
+     #coordinates of before/after text
+     x_before=ymd(date)-4
+     y_before=max_volume*0.50
+     x_after=ymd(date)+10
+     y_after=max_volume*0.50
+
+  }
+
+  if(hashtag=="KnivesOut"){
+    # release date annotation
+     a <- list(
+      x = ymd(date),
+      y = max_volume*0.98,
+      text = "Release Date",
+      xref = "x",
+      yref = "y",
+      showarrow = TRUE,
+      arrowhead = 5,
+      ax=-125,
+      ay=0
+    )
+
+     #coordinates of before/after text
+     x_before=ymd(date)-8
+     y_before=max_volume*0.55
+     x_after=ymd(date)+1
+     y_after=max_volume*0.70
+
+  }
+
+  if(hashtag=="CharliesAngels"){
+    # release date annotation
+     a <- list(
+      x = ymd(date),
+      y = max_volume*0.98,
+      text = "Release Date",
+      xref = "x",
+      yref = "y",
+      showarrow = TRUE,
+      arrowhead = 5,
+      ax=-125,
+      ay=0
+    )
+
+     #coordinates of before/after text
+     x_before=ymd(date)-5
+     y_before=max_volume*0.70
+     x_after=ymd(date)+10
+     y_after=max_volume*0.70
+
+  }
+
+
+
+  #before/after annotations
+   before<-getSentimentProportions(df,type="before",date=date,alpha=alpha)
+   after <-getSentimentProportions(df,type="after", date=date,alpha=alpha)
+
+
+  #get the average polarity by date
+  d2<-group_by(df,date)%>%
+    summarize(avg_polarity=mean(polarity))%>%
+    mutate(ma_avg_polarity=ma(avg_polarity,5))
+
+  #join together, ungroup for plotting
+  d3<-inner_join(d1,d2,by="date")%>%
+    dplyr::ungroup()
+
+
+  #create the plot
+  plot_ly(d3,x=~date,y=~positive,type="bar",name="Positive",color =I('#466900'),opacity=0.75)%>%
+    add_trace(d3,x=~date,y=~negative,type='bar',name="Negative", color = I('#7C4325'),opacity=0.75)%>%
+    add_trace(d3,x=~date,y=~neutral,type="bar",name="Neutral",color = I('#A1C423'))%>%
+    add_trace(d3,x=~date,y=~ma.pos.percent,type="scatter",mode="line",name="Avg % Positive (5day)",yaxis='y2',color = I('#2E4500'),opacity=0.75)%>%
+  add_trace(d3,x=~date,y=~ma_avg_polarity,type="scatter",mode="line",name="Avg Polarity (5day)",yaxis='y2',color=I("orange"))%>%  #3FAAA1
+
+
+  layout(title = paste('Tweet Sentiment & Volume:',hashtag),
+          xaxis = list(title = "Date"),
+          yaxis = list(side = 'left', title = 'Tweet Volume', showgrid = TRUE),barmode="stack",
+          yaxis2= list(side = 'right', overlaying = "y", title = 'Polarity and % Positive', showgrid = FALSE),
+          shapes= list(list(type="rect",x0=min_date, x1=ymd(date),y0=0,y1=max_volume,fillcolor="grey",opacity=0.05),
+                  list(type='rect',x0=ymd(date),x1=ymd(max_date), y0=0,y1=max_volume,fillcolor="red", opacity=0.025)),
+         annotations=a,
+         legend=list(y=0))%>%
+         add_annotations(x=x_before,y=y_before,text=before,xref="x",yref="y",showarrow=FALSE,ax=-20,ay=-20)%>%
+         add_annotations(x=x_after,y=y_after,text=after,xref="x",yref="y",showarrow=FALSE,ax=-20,ay=-20)
+
+
+}
+
+```
+
+# Sentiment scatterplot
++ scatterplot of polarity vs time and # of followers
++ included option to remove tweets by authors over max_followers lime- removes outliers for plotting
+```{r}
+
+plotTweetScatterPlot<-function(df,release.date,max_followers='all'){
+
+  require(dplyr)
+  require(scales)
+  require(ggformula)
+  require(lubridate)
+
+  # remove accounts with followers > max_followers
+  # necessary if there are a few really large followers (which really skew the size dimension in the chart)
+  if(is.numeric(max_followers)){
+    removed<-nrow(filter(df,followers_count>max_followers))
+    df<-filter(df,followers_count<max_followers)
+    caption_text =paste("Removed ",removed," tweet(s) from accounts with followers > ",comma_format()(max_followers))
+  }else{
+    caption_text = ""
+  }
+
+
+  #find max y height, and before/after dates for plotting the rectangles for before/after
+   min_date<-min(df$date)
+   max_date<-max(df$date)
+
+
+
+  # create the chart
+  # add a rectagle to to show the release date
+  gf_point(df
+         ,gformula = polarity~date
+         ,color=~sentiment
+         ,size=~followers_count/1000
+         ,title = "Sentiment by Date"
+         ,subtitle = "Size proportional to followers"
+         ,caption = caption_text
+         ,alpha = 0.5)%>%
+  gf_refine(scale_color_manual(values=c("#7C4325","#A1C423","#466900")))%>%
+  gf_refine(labs(size = "Followers \n (1,000)", color="Sentiment"))%>%
+  gf_refine(annotate("rect",xmin=min_date,xmax=ymd(release.date),ymin=-1,ymax=1,alpha=0.05))%>%
+  gf_refine(annotate("rect",xmin=ymd(release.date),xmax=max_date,ymin=-1,ymax=1,alpha=0.05,fill="red"))%>%
+  gf_refine(annotate("text",x=ymd(release.date),y=1.15,label="Release\n Date",size=3,color="grey"))%>%
+  gf_theme(theme_minimal())
+}
+
+```
+
+
+
+
+# Test for proportions - by release date
+```{r}
+testProportionsByReleaseDate<-function(df,release_date,alpha=0.05){
+  #http://sphweb.bumc.bu.edu/otlt/MPH-Modules/BS/R/R6_CategoricalDataAnalysis/R6_CategoricalDataAnalysis6.html
+
+
+  #H0: p(positive,negative,neutral) before release = p(postive,negative,neutral) after release
+  #Ha: p(before) !=p(after) - for at least one category
+
+  #split the dataset by release_date
+  df_before<-filter(df,date<ymd(release_date))%>%
+    group_by(sentiment)%>%
+    summarize(count=n())%>%
+    arrange(sentiment)
+
+
+  df_after<-filter(df,date>=ymd(release_date))%>%
+    group_by(sentiment)%>%
+    summarize(count=n())%>%
+    arrange(sentiment)
+
+  # some error handling, usually when you put the wrong date in for a movie
+  # perform the test
+  if(length(df_before)!=length(df_after)){
+    print("Check the dates! Before length not equal to after length")
+  }else{
+    result<-prop.test(df_before$count,df_after$count,alternative = "two.sided")
+    if(result$p.value<alpha){
+      #reject Ho
+      decision<-paste("Reject the Null, Proportions are different before/after relase date at an alpha level of ",alpha)
+      #return(result)
+    }else{
+      #fail to reject ho
+      decision<-paste("Fail to reject the null, proportions may be the same before/after release date at an alpha level of ",alpha)
+      #return(result)
+    }
+
+  }
+
+  #Return the test result, the before/after proportions, and the decision in the list
+  return(list(result=result,before=df_before,after=df_after,decision=decision))
+
+}
+
+
+
+```
+
+
+# Splits a dataframe by the date
++ used in the plotTweetSentiment() chart
++ converts proportions to formated text for plotting
+```{r}
+getSentimentProportions<-function(df,type,date="2019-11-8",alpha=0.05){
+
+  #use the testProportionsByReleaseDate function to get the split of before/after proportions
+  tmp<-testProportionsByReleaseDate(df,date,alpha)
+
+  #convert the proportions to a formatted string for plotting
+  if(type=="before"){
+    df<-data.frame(sentitment=tmp[['before']][1],count=tmp[['before']][2])
+    result<-'</br><b>Before</b></br>'
+    total<-sum(df['count'])
+
+    for(row in 1:nrow(df)){
+      sent<-df[row,"sentiment"]
+      per<-df[row,"count"]/total
+      result<-paste(result,sent,":",scales::percent_format()(per),sep=' ','</br> ')
+    }
+  }else{
+    df<-data.frame(sentitment=tmp[['after']][1],count=tmp[['after']][2])
+    result<-'</br><b>After</b></br>'
+    total<-sum(df['count'])
+
+    for(row in 1:nrow(df)){
+      sent<-df[row,"sentiment"]
+      per<-df[row,"count"]/total
+      result<-paste(result,sent,":",scales::percent_format()(per),sep=' ','</br> ')
+    }
+  }
+
+  #return the formatted string
+  return(result)
+}
+
+
+```
+
+
+
+# Test for Proportions - by followers
++ this splits the tweets by the median (or input) follower count & performs the test of proportions by followers
+```{r}
+testProportionsByFollowers<-function(df,alpha=0.05,followers="median"){
+
+
+  #H0: p(positive,negative,neutral) for non-influencers = p(postive,negative,neutral) for influencers
+  #Ha: p(non-influencers) !=p(influencers) - for at least one category
+
+  # determine how to split followers.Default calculates the median
+  # else, use the limit provided
+  if(followers=="median"){
+    med.followers<-median(df$followers_count)
+  }else{
+    med.followers<-followers
+  }
+
+  #split the dataset by followers
+  non_influencers<-filter(df,followers_count<med.followers)%>%
+    group_by(sentiment)%>%
+    summarize(count=n())%>%
+    arrange(sentiment)
+
+
+  influencers<-filter(df,date>=med.followers)%>%
+    group_by(sentiment)%>%
+    summarize(count=n())%>%
+    arrange(sentiment)
+
+
+  # perform the test.
+  if(length(non_influencers)!=length(influencers)){
+    print("Sentiment missing from influencer or non-influencers proportions")
+  }else{
+    result<-prop.test(non_influencers$count,influencers$count,alternative = "two.sided")
+    if(result$p.value<alpha){
+      #reject Ho
+      decision<-paste("Reject the Null, Proportions are different for influencers at an alpha level of ",alpha)
+      #return(result)
+    }else{
+      #fail to reject ho
+      decision<-paste("Fail to reject the null, proportions may be the same for influencers/non-influencers at an alpha level of ",alpha)
+      #return(result)
+    }
+
+  }
+
+  return(list(result=result,non_influencers=non_influencers,influencers=influencers,decision=decision))
+
+}
+```
+
+# T-Test for means
++ tests of two means are the same
++ used to test mean polarity before/after the movie release
+```{r}
+testForMeans<-function(df,date,alpha=0.05){
+
+  #split the dataset by date
+  before<-mutate(df,period=ifelse(date<ymd("2019-11-8"),"before","after"))%>%
+    filter(period=="after")
+
+  after<-mutate(df,period=ifelse(date<ymd("2019-11-8"),"before","after"))%>%
+    filter(period=="after")
+
+  #perform the test of means
+  result<-t.test(before$polarity,after$polarity,alternative = "two.sided")
+
+  if(result$p.value>alpha){
+    #fail to reject the null
+    print("Fail to reject the null=> There may be no differnce in means")
+
+  }else{
+    #reject the nulll
+    print("Reject the Null=> There is a difference in means")
+  }
+
+  return(result)
+
+}
+```
+
+
+
+
+# Get data from python
++import the tweet data from python for the two hashtags
+```{r message=FALSE, warning=FALSE}
+drSleep<-getTwitterData("TweetData/Output_DrSleep.csv")
+knivesOut<-getTwitterData("TweetData/Output_KnivesOut.csv")
+
+```
+
+# plot the results for DrSleep
+```{r message=FALSE, warning=FALSE}
+plotTweetSentiment(drSleep,"2019-11-8")
+plotTweetScatterPlot(drSleep,max_followers = 13000000,release.date =  "2019-11-8")
+plotHistograms(drSleep,"2019-11-8")
+testProportionsByReleaseDate(drSleep,"2019-11-8")  #significant - proportions are different
+testProportionsByFollowers(drSleep)   #fail to reject the null, no difference in proportions for influencers/non-influencers
+testForMeans(drSleep,"2019-11-8")     #fail to reject the null, no differenc in mean polarity before/after release date
+
+```
+
+# Plot the results for KnivesOut
+```{r message=FALSE, warning=FALSE}
+plotTweetSentiment(knivesOut,"2019-11-27")
+plotTweetScatterPlot(knivesOut,max_followers = "all",release.date =  "2019-11-27")
+plotHistograms(knivesOut,"2019-11-27")
+testProportionsByReleaseDate(knivesOut,"2019-11-27")  #sigficiant -there is a differece in proportions before/after release date
+testProportionsByFollowers(knivesOut)    #significant -there is a difference in proportions for influencers/non-influences
+testForMeans(knivesOut,"2019-11-26")     #fail to reject the null -no difference in mean polarity before/after release date
+
+```
